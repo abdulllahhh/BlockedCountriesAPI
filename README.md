@@ -41,8 +41,8 @@ Temporary Block	POST	/api/countries/temporal-block	Temporarily block a country f
 ✅ Thread-safe in-memory storage using ConcurrentDictionary
 ✅ Background cleanup service for expired temporary blocks
 ✅ Swagger documentation enabled by default
-✅ Clean architecture with separate controllers, services, DTOs
-✅ (Optional) Unit tests using xUnit
+✅ separate controllers, services, DTOs
+
 
 🧩 Technologies Used
 
