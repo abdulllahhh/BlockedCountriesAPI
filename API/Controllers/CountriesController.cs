@@ -1,4 +1,5 @@
 using Business.Interfaces;
+using Business.Models;
 using Business.Record;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.RegularExpressions;
@@ -107,4 +108,4 @@ namespace API.Controllers
     }
 }
 
-}
+
