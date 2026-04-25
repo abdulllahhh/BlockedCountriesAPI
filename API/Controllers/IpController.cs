@@ -1,7 +1,8 @@
-﻿using API.Helpers;
+using API.Helpers;
 using Business.Interfaces;
 using Business.Record;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 using System.Net;
 
 namespace API.Controllers
@@ -13,53 +14,46 @@ namespace API.Controllers
         private readonly IGeoProvider _geoProvider;
         private readonly IBlockedCountriesStore _blockedStore;
         private readonly IRequestLogStore _logStore;
+        private readonly IMemoryCache _cache;
         private readonly ILogger<IpController> _logger;
 
         public IpController(
-        IGeoProvider geoProvider,
-        IBlockedCountriesStore blockedStore,
-        IRequestLogStore logStore,
-        ILogger<IpController> logger)
+            IGeoProvider geoProvider,
+            IBlockedCountriesStore blockedStore,
+            IRequestLogStore logStore,
+            IMemoryCache cache,
+            ILogger<IpController> logger)
         {
             _geoProvider = geoProvider;
             _blockedStore = blockedStore;
             _logStore = logStore;
+            _cache = cache;
             _logger = logger;
         }
 
         /// <summary>
         /// Lookup country information for the given IP address (or caller IP if omitted).
         /// </summary>
-        /// <param name="ipAddress">Optional IP address.</param>
         [HttpGet("lookup")]
         public async Task<IActionResult> LookupIp([FromQuery] string? ipAddress, CancellationToken cancellationToken)
         {
-            // If IP not provided, use caller IP
-            if (string.IsNullOrWhiteSpace(ipAddress))
-            {
-                ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
-                if (string.IsNullOrWhiteSpace(ipAddress))
-                    return BadRequest(new { message = "Unable to determine caller IP address." });
-            }
+            var targetIp = string.IsNullOrWhiteSpace(ipAddress) 
+                ? GetCallerIp() 
+                : ipAddress;
 
-            // Validate IP format (IPv4 or IPv6)
-            if (!Helper.IsValidIp(ipAddress))
-                return BadRequest(new { message = "Invalid IP address format." });
+            if (string.IsNullOrWhiteSpace(targetIp))
+                return BadRequest(new MessageResponse("Unable to determine IP address."));
 
-            var result = await _geoProvider.LookupIpAsync(ipAddress, cancellationToken);
+            if (!Helper.IsValidIp(targetIp))
+                return BadRequest(new MessageResponse("Invalid IP address format."));
 
-            if (result == null)
-                return StatusCode(502, new { message = "Failed to fetch geolocation data from provider." });
+            var geo = await GetCachedGeoAsync(targetIp, cancellationToken);
 
-            return Ok(new
-            {
-                result.Ip,
-                result.CountryCode,
-                result.CountryName,
-                result.Isp
-            });
+            if (geo == null)
+                return StatusCode(502, new MessageResponse("Failed to fetch geolocation data."));
+
+            return Ok(new IpLookupResponse(geo.Ip ?? targetIp, geo.CountryCode, geo.CountryName, geo.Isp));
         }
-
 
         /// <summary>
         /// Check if the caller's IP address belongs to a blocked country.
@@ -67,42 +61,67 @@ namespace API.Controllers
         [HttpGet("check-block")]
         public async Task<IActionResult> CheckIfBlocked(CancellationToken cancellationToken)
         {
-            var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
+            var ipAddress = GetCallerIp();
             if (string.IsNullOrWhiteSpace(ipAddress))
-                return BadRequest(new { message = "Unable to determine caller IP address." });
+                return BadRequest(new MessageResponse("Unable to determine caller IP address."));
 
-            if (!IPAddress.TryParse(ipAddress, out _))
-                return BadRequest(new { message = "Invalid IP address format." });
-
-            var geo = await _geoProvider.LookupIpAsync(ipAddress, cancellationToken);
+            var geo = await GetCachedGeoAsync(ipAddress, cancellationToken);
             if (geo == null)
-                return StatusCode(502, new { message = "Failed to fetch geolocation data." });
+                return StatusCode(502, new MessageResponse("Failed to fetch geolocation data."));
 
-            var isBlocked = !string.IsNullOrEmpty(geo.CountryCode) &&
-                            _blockedStore.IsBlocked(geo.CountryCode);
-            var userAgent = Request.Headers.UserAgent.ToString();
-
-
-            // Log the attempt
+            var isBlocked = !string.IsNullOrEmpty(geo.CountryCode) && _blockedStore.IsBlocked(geo.CountryCode);
+            
             _logStore.AddLog(new IpCheckLog(
                 Ip: ipAddress,
                 CountryCode: geo.CountryCode,
                 CountryName: geo.CountryName,
                 IsBlocked: isBlocked,
-                UserAgent: userAgent,
+                UserAgent: Request.Headers.UserAgent.ToString(),
                 Timestamp: DateTime.UtcNow
             ));
 
-            _logger.LogInformation("IP {IP} ({CountryCode}) checked — Blocked: {Blocked}",
-                ipAddress, geo.CountryCode, isBlocked);
-
-            return Ok(new
-            {
-                ip = ipAddress,
-                geo.CountryCode,
-                geo.CountryName,
-                isBlocked
-            });
+            return Ok(new CheckBlockResponse(ipAddress, geo.CountryCode, geo.CountryName, isBlocked));
         }
+
+        private string? GetCallerIp()
+        {
+            // Try to get from X-Forwarded-For first (if middleware didn't already populate RemoteIpAddress)
+            // Note: UseForwardedHeaders middleware usually moves this to RemoteIpAddress
+            return HttpContext.Connection.RemoteIpAddress?.ToString();
+        }
+
+        private async Task<Business.Models.GeoResult?> GetCachedGeoAsync(string ip, CancellationToken ct)
+        {
+            if (Helper.IsInternalIp(ip))
+            {
+                return new Business.Models.GeoResult 
+                { 
+                    Ip = ip, 
+                    CountryCode = "LOCAL", 
+                    CountryName = "Internal Network", 
+                    Isp = "Private/Loopback" 
+                };
+            }
+
+            var cacheKey = $"geo_{ip}";
+            if (_cache.TryGetValue(cacheKey, out Business.Models.GeoResult? cachedGeo))
+            {
+                return cachedGeo;
+            }
+
+            var geo = await _geoProvider.LookupIpAsync(ip, ct);
+            if (geo != null)
+            {
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetAbsoluteExpiration(TimeSpan.FromHours(1))
+                    .SetSlidingExpiration(TimeSpan.FromMinutes(30));
+                
+                _cache.Set(cacheKey, geo, cacheOptions);
+            }
+
+            return geo;
+        }
+
     }
 }
+

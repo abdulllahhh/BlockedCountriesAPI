@@ -1,8 +1,8 @@
-
 using Business.Interfaces;
 using Infrastructure.Services;
 using Infrastructure.Services.GeoProviders;
-
+using Microsoft.AspNetCore.HttpOverrides;
+using System.Reflection;
 
 namespace API
 {
@@ -13,37 +13,46 @@ namespace API
             var builder = WebApplication.CreateBuilder(args);
 
             // Add services to the container.
-
             builder.Services.AddControllers();
-            // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-            builder.Services.AddOpenApi();
-            builder.Services.AddHttpClient();
-            builder.Services.AddSingleton<IBlockedCountriesStore, BlockedCountriesStore>();
-            builder.Services.AddHttpClient<IGeoProvider, IpapiProvider>();
-            builder.Services.AddSingleton<IRequestLogStore, RequestLogStore>();
-            builder.Services.AddHostedService<TemporaryBlockCleanupService>();
             builder.Services.AddEndpointsApiExplorer();
-            builder.Services.AddSwaggerGen(); // ? Swagger
+            builder.Services.AddSwaggerGen(options =>
+            {
+                var xmlFilename = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+                options.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, xmlFilename));
+            });
 
+            builder.Services.AddHttpClient();
+            builder.Services.AddMemoryCache();
 
+            // Dependency Injection
+            builder.Services.AddSingleton<IBlockedCountriesStore, BlockedCountriesStore>();
+            builder.Services.AddSingleton<IRequestLogStore, RequestLogStore>();
+            builder.Services.AddHttpClient<IGeoProvider, IpapiProvider>();
+            
+            builder.Services.AddHostedService<TemporaryBlockCleanupService>();
 
             var app = builder.Build();
 
             // Configure the HTTP request pipeline.
+            
+            // 1. Forwarded Headers (MUST be first)
+            app.UseForwardedHeaders(new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+            });
+
             if (app.Environment.IsDevelopment())
             {
                 app.UseSwagger();
-                app.MapOpenApi();
+                app.UseSwaggerUI();
             }
 
             app.UseHttpsRedirection();
-
             app.UseAuthorization();
-
-
             app.MapControllers();
 
             app.Run();
         }
     }
 }
+

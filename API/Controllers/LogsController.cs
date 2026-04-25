@@ -1,4 +1,4 @@
-﻿using Business.Interfaces;
+using Business.Interfaces;
 using Business.Record;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,26 +21,20 @@ namespace API.Controllers
         [HttpGet("blocked-attempts")]
         public IActionResult GetBlockedAttempts([FromQuery] int page = 1, [FromQuery] int pageSize = 10)
         {
-            var allLogs = _logStore.GetAll()
-                .Where(l => l.IsBlocked)
-                .OrderByDescending(l => l.Timestamp)
-                .Select(l => new BlockedAttemptResponse(
-                    l.Ip, l.CountryCode, l.CountryName, l.Timestamp, l.UserAgent))
-                .ToList();
+            var query = _logStore.GetAll().Where(l => l.IsBlocked);
 
-            var totalCount = allLogs.Count;
+            var totalCount = query.Count();
+            var items = query.OrderByDescending(l => l.Timestamp)
+                             .Skip((page - 1) * pageSize)
+                             .Take(pageSize)
+                             .Select(l => new BlockedAttemptResponse(
+                                 l.Ip, l.CountryCode, l.CountryName, l.Timestamp, l.UserAgent))
+                             .ToList();
+
             var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
-            var items = allLogs.Skip((page - 1) * pageSize).Take(pageSize);
 
-            var result = new PagedResult<BlockedAttemptResponse>(
-                Items: items,
-                Page: page,
-                PageSize: pageSize,
-                TotalCount: totalCount,
-                TotalPages: totalPages
-            );
-
-            return Ok(result);
+            return Ok(new PagedResult<BlockedAttemptResponse>(items, page, pageSize, totalCount, totalPages));
         }
     }
 }
+
